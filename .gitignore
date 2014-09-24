@@ -1,0 +1,6 @@
+*.py[cod]
+
+# Emacs backup and messup files
+*#
+*~
+*.#*
