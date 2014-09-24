@@ -1,9 +1,21 @@
+import argparse
 from collections import defaultdict
 import csv
 
 
 class Actor(object):
+    """An actor with bounded rationality.
 
+    The methods on this class such as u_success, u_failure, eu_challenge are
+    meant to be calculated from the actor's perspective, which in practice
+    means that the actor's risk aversion is always used, including to calculate
+    utilities for other actors.
+
+    I don't understand why an actor would assume that other actors share the
+    same risk aversion, or how this implies that it is from the given actor's
+    point of view, but as far as I can tell this is faithful to BDM's original
+    formulation as well as Scholz's replication.
+    """
     def __init__(self, name, c, s, x, model, r=1.0):
         self.name = name
         self.c = c  # capabilities, float between 0 and 1
@@ -20,6 +32,7 @@ class Actor(object):
             self.name, self.x, self.c, self.s, self.r)
 
     def compare(self, x_j, x_k, risk=None):
+        """Difference in utility to `self` between positions x_j and x_k."""
         risk = risk or self.r
 
         position_range = self.model.position_range
@@ -28,19 +41,27 @@ class Actor(object):
         return self.c * self.s * (x_k_distance - x_j_distance)
 
     def u_success(self, actor, x_j):
+        """Utility to `actor` successfully challenging position x_j."""
         position_range = self.model.position_range
         val = 0.5 - 0.5 * abs(actor.x - x_j) / position_range
         return 2 - 4 * val ** self.r
 
     def u_failure(self, actor, x_j):
+        """Utility to `actor` of failing in challenge position x_j."""
         position_range = self.model.position_range
         val = 0.5 + 0.5 * abs(actor.x - x_j) / position_range
         return 2 - 4 * val ** self.r
 
     def u_status_quo(self):
+        """Utility to `self` of the status quo."""
         return 2 - 4 * (0.5 ** self.r)
 
     def eu_challenge(self, actor_i, actor_j):
+        """Expected utility to `actor_i' of `actor_i` challenging `actor_j`.
+
+        This is calculated from the perspective of actor `self`, which in
+        practice means that `self.r` is used for risk aversion.
+        """
         prob_success = self.model.probability(actor_i.x, actor_j.x)
         u_success = self.u_success(actor_i, actor_j.x)
         u_failure = self.u_failure(actor_i, actor_j.x)
@@ -54,29 +75,45 @@ class Actor(object):
         return eu_resist + eu_not_resist - eu_status_quo
 
     def danger_level(self):
+        """The amount of danger the actor is in from holding its policy position.
+
+        The smaller this number is, the more secure the actor is, in that it
+        expects fewer challenges to its position from other actors.
+        """
         return sum(self.eu_challenge(other_actor, self) for other_actor
                    in self.model.actors if other_actor != self)
 
     def risk_acceptance(self):
-        # Right now I'm thinking that this isn't the right way to do. Instead
-        # of max danger and min danger of all actors, you should calculate the
-        # max danger and min danger for this specific actor of having different
-        # policy positions. Otherwise, powerful actors will always appear low
-        # risk, because they will be at low risk compared to weaker actors.
+        """Actor's risk acceptance, based on its current policy position.
 
-        # danger = self.get_danger(actor)
+        I have two comments:
+        - It seems to me that BDM's intent was that in order to calculate
+          risk acceptance, one would need to compare an actor's danger level
+          across different policy positions that the actor could hold. Instead,
+          Scholz compares the actor's danger level to the danger level of all
+          other actors. This comparison doesn't seem relevant, given that other
+          actors will have danger levels not possible for the given actor
+          because of differences in salience and capability.
+        - Even (what I assume to be) BDM's original intention is an odd way to
+          calculate risk acceptance, given that the actor's policy position may
+          have been coerced, rather than having been chosen by the actor based
+          on its security preferences.
+        """
 
-        # orig_position = actor.x
+        # Alternative calculation, which I think is more faithful to
+        # BDM's original intent.
+
+        # orig_position = self.x
         # possible_dangers = []
-        # for position in self.positions():
-        #     actor.x = position
-        #     possible_dangers.append(self.get_danger(actor))
-        # actor.x = orig_position
+        # for position in self.model.positions():
+        #     self.x = position
+        #     possible_dangers.append(self.danger_level())
+        # self.x = orig_position
 
         # max_danger = max(possible_dangers)
         # min_danger = min(possible_dangers)
 
-        # return ((2 * danger - max_danger - min_danger) /
+        # return ((2 * self.danger_level() - max_danger - min_danger) /
         #         (max_danger - min_danger))
 
         danger_levels = [actor.danger_level() for actor in self.model.actors]
@@ -105,11 +142,11 @@ class Actor(object):
 
         # This is faithful to Scholz' original code, but it appears to be a
         # mistake, since Scholz' paper and BDM clearly state that each actor
-        # chooses the offer that requires them to change position the
+        # chooses the offer that requires him to change position the
         # least. Instead, Scholz included a special case for compromises which
         # results in some bizarre behavior, particularly in Round 4 when
-        # Belgium compromises with Belgium to an extreme position rather than
-        # with France.
+        # Belgium compromises with Netherlands to an extreme position rather
+        # than with France.
         def compromise_best_offer_key(offer):
             top = (abs(offer.eu) * offer.actor.x +
                    abs(offer.other_eu) * offer.other_actor.x)
@@ -229,6 +266,23 @@ class BDMScholzModel(object):
     def probability(self, x_i, x_j):
         if x_i == x_j:
             return 0.0
+
+        # `sum_all_votes` below is faithful to Scholz' code, but I think it is
+        # quite contrary to BDM's intent. Instead, we should have.
+        # denominator = sum(actor.compare(x_i, x_j) for actor in self.actors)
+
+        # This would make sure that prob(x_i, x_j) + prob(x_j, x_i) == 1.
+        # However, because of the odd way that salience values are used as
+        # the probability that an actor will resist a proposal, this results in
+        # the actors almost always confronting each other.
+
+        # My theory is that Scholz got around the confrontation problem by
+        # introducing this large denominator, causing extremely small
+        # probability values. This prevents actors from confronting each other
+        # constantly, but the result is comical, in that the challenging actor
+        # always has a vanishingly small chance of winning a conflict, yet the
+        # challenged actor often gives up without a fight because of low
+        # salience.
         sum_all_votes = sum(abs(actor.compare(a1.x, a2.x))
                             for actor in self.actors
                             for a1 in self.actors
@@ -253,16 +307,31 @@ class BDMScholzModel(object):
                 print best_offer
                 actor.x = best_offer.position
 
-    def run_model(self, num_times=1):
+    def run_model(self, num_rounds=1):
         print 'Median position: %s' % self.median_position()
         print 'Mean position: %s' % self.mean_position()
 
-        for count in range(1, num_times + 1):
+        for round_ in range(1, num_rounds + 1):
             print ''
-            print 'ROUND %d' % count
+            print 'ROUND %d' % round_
             self.update_risk_aversions()
             self.update_positions()
 
             print ''
             print 'Median position: %s' % self.median_position()
             print 'Mean position: %s' % self.mean_position()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        'csv_path',
+        help='path to csv with input data')
+    parser.add_argument(
+        'num_rounds',
+        help='number of rounds of simulation to run',
+        type=int)
+    args = parser.parse_args()
+
+    model = BDMScholzModel.from_csv_path(args.csv_path)
+    model.run_model(num_rounds=args.num_rounds)
